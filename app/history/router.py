@@ -1,10 +1,10 @@
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.jwt_middleware import get_current_user
@@ -61,13 +61,23 @@ async def aggregate_sensor_data(
     end_time: datetime = Query(..., description="查询结束时间"),
     greenhouse_id: str | None = Query(None, description="大棚编号"),
     metric_type: str | None = Query(None, description="指标类型"),
-    interval_minutes: int = Query(default=60, description="聚合时间间隔(分钟)"),
+    interval_minutes: int = Query(default=60, ge=1, le=10080,
+                                   description="聚合时间间隔(分钟)，范围 1-10080(7天)"),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    interval_expr = func.date_trunc(
-        "hour",
+    if end_time <= start_time:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="结束时间必须大于起始时间",
+        )
+
+    interval_str = f"{interval_minutes} minutes"
+
+    interval_expr = func.date_bin(
+        text(f"'{interval_str}'::interval"),
         SensorData.collected_at,
+        start_time,
     )
 
     stmt = select(
@@ -94,10 +104,11 @@ async def aggregate_sensor_data(
     return [
         {
             "time_bucket": r.time_bucket.isoformat() if r.time_bucket else None,
-            "avg_value": round(r.avg_value, 2) if r.avg_value else None,
-            "min_value": r.min_value,
-            "max_value": r.max_value,
-            "count": r.count,
+            "avg_value": round(float(r.avg_value), 2) if r.avg_value is not None else None,
+            "min_value": float(r.min_value) if r.min_value is not None else None,
+            "max_value": float(r.max_value) if r.max_value is not None else None,
+            "count": int(r.count) if r.count is not None else 0,
+            "interval_minutes": interval_minutes,
         }
         for r in rows
     ]

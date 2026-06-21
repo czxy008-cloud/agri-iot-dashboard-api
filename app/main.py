@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.alerts.manager import check_alerts
 from app.auth.jwt_middleware import get_password_hash
+from app.config import settings
 from app.database import async_session_factory
 from app.devices.mqtt_client import mqtt_manager
 from app.models import Device, SensorData, User
@@ -14,6 +15,30 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin123"
+_INSECURE_JWT_KEY = "change-this-to-a-secure-random-key-in-production"
+
+
+def _check_jwt_security():
+    """
+    检查 JWT 密钥安全配置：
+    - 如果仍是默认的占位密钥，输出强烈警告。
+    - 建议用户通过 .env 或环境变量 JWT_SECRET_KEY 覆盖。
+    """
+    if settings.JWT_SECRET_KEY == _INSECURE_JWT_KEY:
+        border = "!" * 72
+        logger.critical(border)
+        logger.critical("  【安全警告】 JWT_SECRET_KEY 仍使用默认占位密钥！")
+        logger.critical("  任何拿到源码的人都可伪造 token 绕过权限校验，")
+        logger.critical("  直接访问所有受保护的设备管理等敏感接口！")
+        logger.critical("  ")
+        logger.critical("  请立即通过环境变量或 .env 文件设置：")
+        logger.critical('    JWT_SECRET_KEY="<请替换为长度>=32的高强度随机字符串>"')
+        logger.critical("  ")
+        logger.critical("  示例 (PowerShell 生成随机密钥):")
+        logger.critical('    $bytes = New-Object byte[] 32;')
+        logger.critical('    [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes);')
+        logger.critical('    [Convert]::ToBase64String($bytes)')
+        logger.critical(border)
 
 
 async def _init_default_user():
@@ -53,6 +78,10 @@ async def _on_mqtt_message(parsed_data: dict):
     """
     MQTT 消息回调：将解析后的传感器数据写入数据库，并检查告警规则。
     """
+    device_code = parsed_data.get("device_code", "?")
+    metric_type = parsed_data.get("metric_type", "?")
+    metric_value = parsed_data.get("metric_value", "?")
+
     try:
         async with async_session_factory() as db:
             result = await db.execute(
@@ -60,7 +89,12 @@ async def _on_mqtt_message(parsed_data: dict):
             )
             device = result.scalar_one_or_none()
             if not device:
-                logger.warning("收到未知设备 %s 的数据，已忽略", parsed_data["device_code"])
+                logger.error(
+                    "数据入库失败: 设备 %s 未在系统中登记，数据已丢弃！"
+                    " 请先通过 POST /api/devices 注册该设备。"
+                    " (metric=%s, value=%s)",
+                    parsed_data["device_code"], metric_type, metric_value,
+                )
                 return
 
             sensor_record = SensorData(
@@ -72,13 +106,23 @@ async def _on_mqtt_message(parsed_data: dict):
             db.add(sensor_record)
             await db.commit()
 
+        logger.info(
+            "数据入库成功 device=%s metric=%s value=%s",
+            device_code, metric_type, metric_value,
+        )
+
         await check_alerts(parsed_data)
     except Exception:
-        logger.exception("处理 MQTT 消息时发生错误")
+        logger.exception(
+            "处理 MQTT 消息异常 device=%s metric=%s value=%s",
+            device_code, metric_type, metric_value,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _check_jwt_security()
+
     await _init_default_user()
 
     mqtt_manager.set_message_callback(_on_mqtt_message)

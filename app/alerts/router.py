@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,7 +92,10 @@ async def update_alert_rule(
     result = await db.execute(select(AlertRule).where(AlertRule.id == rule_id))
     rule = result.scalar_one_or_none()
     if not rule:
-        raise Exception("告警规则不存在")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"告警规则 ID={rule_id} 不存在",
+        )
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(rule, field, value)
     await db.flush()
@@ -121,7 +124,10 @@ async def acknowledge_alert(
     result = await db.execute(select(AlertLog).where(AlertLog.id == log_id))
     log_entry = result.scalar_one_or_none()
     if not log_entry:
-        raise Exception("告警日志不存在")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"告警日志 ID={log_id} 不存在",
+        )
     log_entry.acknowledged = True
     await db.flush()
     return {"detail": "已确认告警"}
