@@ -134,7 +134,21 @@ async def acknowledge_alert(
 
 
 @router.websocket("/ws")
-async def alert_websocket(websocket: WebSocket):
+async def alert_websocket(websocket: WebSocket, token: str | None = None):
+    """
+    实时告警 WebSocket 接口。
+    
+    连接方式: ws://host/api/alerts/ws?token=<JWT_TOKEN>
+    
+    未认证的连接将被直接拒绝，关闭码 1008 (policy violation)。
+    """
+    from app.auth.jwt_middleware import get_current_user_for_ws
+
+    user = await get_current_user_for_ws(websocket, token)
+    if user is None:
+        await websocket.close(code=1008, reason="未授权的访问：请通过 query 参数提供有效的 JWT token")
+        return
+
     await ws_manager.connect(websocket)
     try:
         while True:
