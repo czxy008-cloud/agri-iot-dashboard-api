@@ -2,13 +2,13 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.jwt_middleware import get_current_user
 from app.database import get_db
 from app.models import AlertLog, Device, SensorData, User
-from app.devices.schemas import DeviceCreate, DeviceOut, DeviceUpdate
+from app.devices.schemas import DeviceCreate, DeviceOut, DeviceUpdate, SensorDataIn, SensorDataOut
 
 router = APIRouter(prefix="/api/devices", tags=["设备管理"])
 
@@ -117,7 +117,59 @@ async def delete_device(
         )
 
     if force:
-        await db.execute(SensorData.__table__.delete().where(SensorData.device_id == device_id))
-        await db.execute(AlertLog.__table__.delete().where(AlertLog.device_id == device_id))
+        await db.execute(
+            text("DELETE FROM sensor_data WHERE device_id = :device_id"),
+            {"device_id": device_id},
+        )
+        await db.execute(
+            text("DELETE FROM alert_logs WHERE device_id = :device_id"),
+            {"device_id": device_id},
+        )
 
     await db.delete(device)
+
+
+@router.post("/{device_id}/data", response_model=SensorDataOut, status_code=status.HTTP_201_CREATED)
+async def submit_sensor_data(
+    device_id: uuid.UUID,
+    body: SensorDataIn,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """
+    HTTP 传感器数据上报接口。
+    当 MQTT 不可用时，可通过此接口直接提交传感器数据。
+    同时会触发告警规则检查和 WebSocket 推送。
+    """
+    result = await db.execute(select(Device).where(Device.id == device_id))
+    device = result.scalar_one_or_none()
+    if not device:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"设备 ID={device_id} 不存在",
+        )
+
+    collected_at = body.collected_at or datetime.now(timezone.utc)
+    record = SensorData(
+        device_id=device.id,
+        metric_type=body.metric_type,
+        metric_value=body.metric_value,
+        collected_at=collected_at,
+    )
+    db.add(record)
+    await db.flush()
+    await db.refresh(record)
+
+    try:
+        from app.alerts.manager import check_alerts
+
+        await check_alerts({
+            "device_code": device.device_code,
+            "metric_type": body.metric_type,
+            "metric_value": body.metric_value,
+            "collected_at": collected_at,
+        })
+    except Exception:
+        pass
+
+    return record

@@ -101,15 +101,21 @@ class MQTTManager:
         gmqtt 的 on_message 回调是同步的，
         必须通过 asyncio.create_task 把异步回调调度到事件循环，
         否则协程对象不会被执行，数据会直接丢失！
+        
+        注意：必须使用 asyncio.get_running_loop() 而非 get_event_loop()。
+        gmqtt 在事件循环线程内调用此回调，get_running_loop() 能安全获取
+        正在运行的循环；而 get_event_loop() 在 Python 3.12+ 中可能
+        返回错误的循环或触发 RuntimeError，导致任务永远不会被调度执行。
         """
         if self._on_message_callback:
             parsed = parse_mqtt_payload(topic, payload)
             if parsed:
                 try:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                 except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                    logger.error("无法获取运行中的事件循环，MQTT 数据将丢失！"
+                                 " 请确认 uvicorn 使用 asyncio 事件循环。")
+                    return
                 task = loop.create_task(self._on_message_callback(parsed))
                 task.add_done_callback(self._on_task_done)
 
